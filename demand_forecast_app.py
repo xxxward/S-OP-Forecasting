@@ -36,9 +36,41 @@ def get_google_sheets_client():
         st.error(f"Error connecting to Google Sheets: {e}")
         return None
 
+def detect_header_row(data, max_rows_to_check=5):
+    """
+    Auto-detect which row contains the headers
+    Returns the index (0-based) of the header row
+    """
+    if not data or len(data) == 0:
+        return 0
+    
+    # Check first few rows to find headers
+    for i in range(min(max_rows_to_check, len(data))):
+        row = data[i]
+        
+        # Count non-empty cells
+        non_empty = sum(1 for cell in row if cell and str(cell).strip())
+        
+        # If row has at least 3 non-empty cells, consider it a potential header
+        if non_empty >= 3:
+            # Check if next row exists and looks like data (not another header)
+            if i + 1 < len(data):
+                next_row = data[i + 1]
+                next_non_empty = sum(1 for cell in next_row if cell and str(cell).strip())
+                
+                # If next row also has data, this is likely the header row
+                if next_non_empty >= 3:
+                    return i
+            else:
+                # Last row with data, assume it's header
+                return i
+    
+    # Default to first row if nothing found
+    return 0
+
 @st.cache_data(ttl=300)  # Cache for 5 minutes
 def load_google_sheet_data(sheet_url, worksheet_name=None):
-    """Load data from Google Sheet"""
+    """Load data from Google Sheet with auto-detected headers"""
     try:
         client = get_google_sheets_client()
         if client is None:
@@ -60,8 +92,25 @@ def load_google_sheet_data(sheet_url, worksheet_name=None):
             st.warning("No data found in the sheet")
             return None
         
-        # Convert to DataFrame (first row as headers)
-        df = pd.DataFrame(data[1:], columns=data[0])
+        # Auto-detect header row
+        header_index = detect_header_row(data)
+        
+        # Convert to DataFrame using detected header row
+        headers = data[header_index]
+        data_rows = data[header_index + 1:]
+        
+        if not data_rows:
+            st.warning("No data rows found after header row")
+            return None
+        
+        df = pd.DataFrame(data_rows, columns=headers)
+        
+        # Remove completely empty rows
+        df = df.replace('', None)
+        df = df.dropna(how='all')
+        
+        # Show which row was detected as header (helpful for debugging)
+        st.sidebar.success(f"✓ Headers detected in row {header_index + 1}")
         
         return df
     except Exception as e:
@@ -85,6 +134,8 @@ def main():
         # Worksheet selector
         worksheet_name = st.text_input("Worksheet Name (leave blank for first sheet)", "")
         
+        st.caption("💡 Headers are auto-detected")
+        
         # Refresh button
         if st.button("🔄 Refresh Data"):
             st.cache_data.clear()
@@ -92,7 +143,10 @@ def main():
     
     # Load data
     with st.spinner("Loading data from Google Sheets..."):
-        df = load_google_sheet_data(sheet_url, worksheet_name if worksheet_name else None)
+        df = load_google_sheet_data(
+            sheet_url, 
+            worksheet_name if worksheet_name else None
+        )
     
     if df is not None:
         # Display data info
