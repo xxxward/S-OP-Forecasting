@@ -191,21 +191,12 @@ def prepare_data(df: pd.DataFrame) -> pd.DataFrame:
     
     # ═══ RULE 1: Sales Rep Master ═══
     # Use Inv - Rep Master if not null, else SO - Rep Master
-    def get_sales_rep(row):
-        if pd.notna(row['Inv - Rep Master']):
-            return row['Inv - Rep Master']
-        return row['SO - Rep Master']
-    
-    df['sales_rep_master'] = df.apply(get_sales_rep, axis=1)
+    # combine_first() uses the first Series, fills NaNs with second Series
+    df['sales_rep_master'] = df['Inv - Rep Master'].combine_first(df['SO - Rep Master'])
     
     # ═══ RULE 2: Customer Corrected ═══
     # Use Inv - Correct Customer if not null, else SO - Customer Companyname
-    def get_customer(row):
-        if pd.notna(row['Inv - Correct Customer']):
-            return row['Inv - Correct Customer']
-        return row['SO - Customer Companyname']
-    
-    df['customer_corrected'] = df.apply(get_customer, axis=1)
+    df['customer_corrected'] = df['Inv - Correct Customer'].combine_first(df['SO - Customer Companyname'])
     
     # ═══ Date Parsing ═══
     date_cols = {
