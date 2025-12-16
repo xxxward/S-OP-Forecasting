@@ -171,20 +171,29 @@ def load_data():
 def prepare_data(df: pd.DataFrame) -> pd.DataFrame:
     """
     Prepare merged SO & Invoice data following exact rules:
-    1. Create Sales Rep (Master) field
-    2. Create Customer (Corrected) field  
+    1. Create Sales Rep Master field
+    2. Create Customer Corrected field  
     3. Parse dates correctly
     4. Aggregate invoice metrics
     5. Create derived fields
     """
     
-    # ═══ RULE 1: Sales Rep (Master) ═══
-    # Use Inv - Rep Master if not null, else SO - Rep Master
-    df['Sales Rep (Master)'] = df['Inv - Rep Master'].fillna(df['SO - Rep Master'])
+    # Check if required columns exist
+    required_cols = ['Inv - Rep Master', 'SO - Rep Master', 'Inv - Correct Customer', 'SO - Customer Companyname']
+    missing = [col for col in required_cols if col not in df.columns]
+    if missing:
+        st.error(f"❌ Missing required columns: {missing}")
+        st.info(f"Available columns: {df.columns.tolist()[:20]}...")  # Show first 20
+        st.stop()
     
-    # ═══ RULE 2: Customer (Corrected) ═══
+    # ═══ RULE 1: Sales Rep Master ═══
+    # Use Inv - Rep Master if not null, else SO - Rep Master
+    df = df.copy()
+    df['sales_rep_master'] = df['Inv - Rep Master'].fillna(df['SO - Rep Master'])
+    
+    # ═══ RULE 2: Customer Corrected ═══
     # Use Inv - Correct Customer if not null, else SO - Customer Companyname
-    df['Customer (Corrected)'] = df['Inv - Correct Customer'].fillna(df['SO - Customer Companyname'])
+    df['customer_corrected'] = df['Inv - Correct Customer'].fillna(df['SO - Customer Companyname'])
     
     # ═══ Date Parsing ═══
     date_cols = {
@@ -278,7 +287,7 @@ def revenue_forecast_by_rep(df: pd.DataFrame) -> pd.DataFrame:
     df['forecast_month'] = df['so_pending_fulfillment'].dt.to_period('M').dt.to_timestamp()
     
     # Group by rep and month
-    forecast = df.groupby(['Sales Rep (Master)', 'forecast_month']).agg({
+    forecast = df.groupby(['sales_rep_master', 'forecast_month']).agg({
         'so_amount': 'sum',                    # Planned Revenue
         'actual_revenue_billed': 'sum',        # Actual Revenue
         'revenue_remaining': 'sum'             # Remaining Revenue
@@ -292,7 +301,7 @@ def pipeline_health_by_rep(df: pd.DataFrame) -> pd.DataFrame:
     """
     Pipeline Health per Sales Rep
     """
-    health = df.groupby('Sales Rep (Master)').agg({
+    health = df.groupby('sales_rep_master').agg({
         'so_amount': 'sum',
         'actual_revenue_billed': 'sum',
         'revenue_remaining': 'sum',
@@ -306,7 +315,7 @@ def pipeline_health_by_rep(df: pd.DataFrame) -> pd.DataFrame:
     health['% Remaining'] = (health['Remaining Revenue'] / health['Total Planned Revenue'] * 100).fillna(0)
     
     # Count open SO lines (not fully invoiced)
-    open_lines = df[~df['is_fully_invoiced']].groupby('Sales Rep (Master)').size().reset_index(name='Open SO Lines')
+    open_lines = df[~df['is_fully_invoiced']].groupby('sales_rep_master').size().reset_index(name='Open SO Lines')
     health = health.merge(open_lines, on='Sales Rep', how='left')
     health['Open SO Lines'] = health['Open SO Lines'].fillna(0).astype(int)
     
@@ -322,7 +331,7 @@ def invoice_lag_analysis(df: pd.DataFrame) -> pd.DataFrame:
     if invoiced.empty:
         return pd.DataFrame()
     
-    lag = invoiced.groupby('Sales Rep (Master)')['invoice_lag_days'].mean().reset_index()
+    lag = invoiced.groupby('sales_rep_master')['invoice_lag_days'].mean().reset_index()
     lag.columns = ['Sales Rep', 'Avg Invoice Lag (Days)']
     lag['Avg Invoice Lag (Days)'] = lag['Avg Invoice Lag (Days)'].round(1)
     
@@ -332,7 +341,7 @@ def invoice_status_breakdown(df: pd.DataFrame) -> pd.DataFrame:
     """
     Count of SO lines by invoice status per Sales Rep
     """
-    breakdown = df.groupby('Sales Rep (Master)').agg({
+    breakdown = df.groupby('sales_rep_master').agg({
         'is_fully_invoiced': 'sum',
         'is_partially_invoiced': 'sum',
         'is_not_invoiced': 'sum'
@@ -502,7 +511,7 @@ def main():
         st.stop()
     
     # Get unique sales reps
-    sales_reps = sorted(df['Sales Rep (Master)'].unique())
+    sales_reps = sorted(df['sales_rep_master'].unique())
     
     # ═══ TOP METRICS ═══
     total_planned = df['so_amount'].sum()
