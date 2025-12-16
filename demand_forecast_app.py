@@ -652,7 +652,6 @@ def forecast_exp(y: pd.Series, cfg: ForecastConfig) -> Tuple[pd.Series, Dict[str
     
     # Minimum data check - need at least 2 points for exponential smoothing
     if len(y) < 2:
-        st.warning(f"Not enough data points ({len(y)}) for exponential smoothing. Need at least 2.")
         # Return naive forecast (repeat last value)
         last_val = y.iloc[-1] if len(y) > 0 else 0.0
         
@@ -1178,8 +1177,16 @@ def bottom_up_forecast(demand: pd.DataFrame, scope: Dict[str, Any], cfg: Forecas
 
     group_cols = ["sku"] + (["customer"] if scope.get("customer") else [])
     out_rows, metas = [], []
+    skipped_count = 0
+    
     for keys, g in df.groupby(group_cols):
         g = g.groupby("ds", as_index=False)["qty"].sum().sort_values("ds")
+        
+        # Skip items with insufficient data (need at least 2 data points for forecasting)
+        if len(g) < 2:
+            skipped_count += 1
+            continue
+        
         if cfg.model == "ml":
             hist = g.copy()
             if isinstance(keys, tuple):
@@ -1203,8 +1210,11 @@ def bottom_up_forecast(demand: pd.DataFrame, scope: Dict[str, Any], cfg: Forecas
         out_rows.append(fc_df)
         metas.append({"keys": keys, "meta": meta})
 
+    if skipped_count > 0:
+        st.info(f"ℹ️ Skipped {skipped_count} items with insufficient data (< 2 data points)")
+
     out = pd.concat(out_rows, ignore_index=True) if out_rows else pd.DataFrame()
-    return out, {"model": cfg.model, "series": metas}
+    return out, {"model": cfg.model, "series": metas, "skipped": skipped_count}
 
 
 def top_down_sales_forecast_units(
