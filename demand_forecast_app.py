@@ -276,6 +276,25 @@ def _gsheets_client():
         ) from e
 
 
+def _dedup_column_names(columns):
+    """
+    Deduplicate column names by adding .1, .2, etc. to duplicates
+    This replaces the internal pandas API that was breaking in pandas 2.0+
+    """
+    seen = {}
+    new_columns = []
+    
+    for col in columns:
+        if col not in seen:
+            seen[col] = 0
+            new_columns.append(col)
+        else:
+            seen[col] += 1
+            new_columns.append(f"{col}.{seen[col]}")
+    
+    return new_columns
+
+
 def _coerce_df(df: pd.DataFrame) -> pd.DataFrame:
     """Safely coerce dataframe columns without assuming shape."""
     if df is None:
@@ -286,12 +305,12 @@ def _coerce_df(df: pd.DataFrame) -> pd.DataFrame:
         df = df.to_frame()
 
     # Ensure columns are strings and unique
-    df.columns = (
+    df.columns = _dedup_column_names(
         pd.Series(df.columns)
         .astype(str)
         .str.strip()
         .fillna("unknown")
-        .pipe(lambda s: pd.io.parsers.ParserBase({"names": s})._maybe_dedup_names(s))
+        .tolist()
     )
 
     for c in df.columns:
