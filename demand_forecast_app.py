@@ -561,7 +561,11 @@ def prepare_demand_history(data: Dict[str, pd.DataFrame], freq="MS") -> pd.DataF
     
     df[c_date] = pd.to_datetime(df[c_date], errors="coerce")
     df = df.dropna(subset=[c_date])
-    df["ds"] = df[c_date].dt.to_period(freq).dt.to_timestamp()
+    
+    # Convert to period-friendly frequency (MS -> M, W -> W)
+    period_freq = "M" if freq == "MS" else freq
+    df["ds"] = df[c_date].dt.to_period(period_freq).dt.to_timestamp()
+    
     df["sku"] = df[c_sku].astype(str).str.strip()
     df["qty"] = df[c_qty].apply(_safe_float)
     df["customer"] = df[c_customer].astype(str).str.strip() if c_customer else "Unknown"
@@ -765,7 +769,7 @@ def main():
     st.markdown("<br>", unsafe_allow_html=True)
     
     # ═══ TABS ═══
-    tabs = st.tabs(["📊 Sales Intelligence", "🏭 Operations", "🔮 Scenarios", "📦 Purchase Orders", "🚚 Logistics"])
+    tabs = st.tabs(["📊 Sales Intelligence", "🏭 Operations", "🔮 Scenarios"])
     
     # ═══════════════════════════════════════════════════════════════════════
     # TAB 1: SALES INTELLIGENCE
@@ -961,41 +965,6 @@ def main():
         impact = base_fc["scenario"].sum() - base_fc["qty"].sum()
         st.metric("💥 Total Impact", format_qty(impact), f"{impact/base_fc['qty'].sum()*100:+.1f}%")
     
-    # ═══════════════════════════════════════════════════════════════════════
-    # TAB 4: PO FORECAST
-    # ═══════════════════════════════════════════════════════════════════════
-    with tabs[3]:
-        st.markdown("## 📦 Purchase Order Intelligence")
-        
-        base_hist = dem.groupby("ds")["qty"].sum()
-        po_fc = run_forecast(base_hist, cfg).reset_index()
-        po_fc.columns = ["ds", "qty_forecast"]
-        po_fc["Safety Stock"] = (po_fc["qty_forecast"] * 0.2).round(0)
-        po_fc["Order Qty"] = po_fc["qty_forecast"] + po_fc["Safety Stock"]
-        po_fc["Est. Cost"] = po_fc["Order Qty"] * 50
-        
-        total_spend = po_fc["Est. Cost"].sum()
-        st.metric("💰 Projected Spend", format_currency(total_spend), f"{horizon} months")
-        
-        st.markdown("---")
-        st.dataframe(
-            po_fc[["ds", "Order Qty", "Est. Cost"]].style.format({
-                "Order Qty": "{:,.0f}",
-                "Est. Cost": "${:,.0f}"
-            }),
-            use_container_width=True,
-            hide_index=True
-        )
-        
-        csv = po_fc.to_csv(index=False)
-        st.download_button("⬇️ Download PO Plan", csv, "po_forecast.csv", "text/csv")
-    
-    # ═══════════════════════════════════════════════════════════════════════
-    # TAB 5: LOGISTICS
-    # ═══════════════════════════════════════════════════════════════════════
-    with tabs[4]:
-        st.markdown("## 🚚 Logistics & Delivery Tracking")
-        st.info("🚧 Shipment tracking module launching Q1 2026")
 
 if __name__ == "__main__":
     main()
