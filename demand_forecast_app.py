@@ -155,13 +155,11 @@ def load_data():
         if len(rows) > 1:
             headers = rows[0]
             
-            # ═══ FIX: Deduplicate Headers ═══
-            # If headers are ["A", "B", "A"], this makes them ["A", "B", "A_1"]
-            # This prevents df['A'] from returning a DataFrame (which breaks combine_first)
+            # ═══ Deduplicate Headers ═══
             deduped_headers = []
             seen = {}
             for h in headers:
-                h = h.strip() # clean whitespace while we are at it
+                h = h.strip()
                 if h in seen:
                     seen[h] += 1
                     deduped_headers.append(f"{h}_{seen[h]}")
@@ -185,39 +183,26 @@ def load_data():
 
 def prepare_data(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Prepare merged SO & Invoice data following exact rules:
-    1. Create Sales Rep Master field
-    2. Create Customer Corrected field  
-    3. Parse dates correctly
-    4. Aggregate invoice metrics
-    5. Create derived fields
+    Prepare merged SO & Invoice data
     """
     
     # Check if required columns exist
     required_cols = ['Inv - Rep Master', 'SO - Rep Master', 'Inv - Correct Customer', 'SO - Customer Companyname']
-    
-    # Clean column names just in case
     df.columns = df.columns.str.strip()
     
     missing = [col for col in required_cols if col not in df.columns]
     if missing:
         st.error(f"❌ Missing required columns: {missing}")
-        st.info(f"Available columns: {df.columns.tolist()[:20]}...")  # Show first 20
         st.stop()
     
-    # Make a copy to avoid SettingWithCopyWarning
     df = df.copy()
     
-    # ═══ RULE 1: Sales Rep Master ═══
-    # Ensure we are working with Series. If duplicates persisted, iloc[:, 0] would fix it,
-    # but the deduplication in load_data should resolve it upstream.
+    # ═══ Sales Rep Master ═══
     inv_rep = df['Inv - Rep Master']
     so_rep = df['SO - Rep Master']
-    
-    # combine_first() uses the first Series, fills NaNs with second Series
     df['sales_rep_master'] = inv_rep.combine_first(so_rep)
     
-    # ═══ RULE 2: Customer Corrected ═══
+    # ═══ Customer Corrected ═══
     df['customer_corrected'] = df['Inv - Correct Customer'].combine_first(df['SO - Customer Companyname'])
     
     # ═══ Date Parsing ═══
@@ -266,14 +251,12 @@ def prepare_data(df: pd.DataFrame) -> pd.DataFrame:
         df = df[df['so_amount'] > 0]
     
     # ═══ Aggregate Invoice Metrics per SO Line ═══
-    # Group by SO line to get aggregated invoice data
     agg_cols = {
         'inv_quantity': 'sum',
         'inv_amount': 'sum',
         'inv_amount_remaining': 'sum'
     }
     
-    # Create SO line identifier
     if 'SO - Internal ID' in df.columns and 'SO - Item' in df.columns:
         df['so_line_id'] = df['SO - Internal ID'].astype(str) + '_' + df['SO - Item'].astype(str)
         
@@ -309,18 +292,13 @@ def prepare_data(df: pd.DataFrame) -> pd.DataFrame:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def revenue_forecast_by_rep(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Revenue Forecast by Sales Rep & Month
-    Uses SO - Pending Fulfillment Date for planning
-    """
-    # Extract month from pending fulfillment
+    """Revenue Forecast by Sales Rep & Month"""
     df['forecast_month'] = df['so_pending_fulfillment'].dt.to_period('M').dt.to_timestamp()
     
-    # Group by rep and month
     forecast = df.groupby(['sales_rep_master', 'forecast_month']).agg({
-        'so_amount': 'sum',                    # Planned Revenue
-        'actual_revenue_billed': 'sum',        # Actual Revenue
-        'revenue_remaining': 'sum'             # Remaining Revenue
+        'so_amount': 'sum',
+        'actual_revenue_billed': 'sum',
+        'revenue_remaining': 'sum'
     }).reset_index()
     
     forecast.columns = ['Sales Rep', 'Month', 'Planned Revenue', 'Actual Revenue', 'Remaining Revenue']
@@ -328,9 +306,7 @@ def revenue_forecast_by_rep(df: pd.DataFrame) -> pd.DataFrame:
     return forecast.sort_values(['Sales Rep', 'Month'])
 
 def pipeline_health_by_rep(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Pipeline Health per Sales Rep
-    """
+    """Pipeline Health per Sales Rep"""
     health = df.groupby('sales_rep_master').agg({
         'so_amount': 'sum',
         'actual_revenue_billed': 'sum',
@@ -346,16 +322,17 @@ def pipeline_health_by_rep(df: pd.DataFrame) -> pd.DataFrame:
     
     # Count open SO lines (not fully invoiced)
     open_lines = df[~df['is_fully_invoiced']].groupby('sales_rep_master').size().reset_index(name='Open SO Lines')
+    
+    # ═══ FIX: Rename column to match 'health' dataframe before merge ═══
+    open_lines.rename(columns={'sales_rep_master': 'Sales Rep'}, inplace=True)
+    
     health = health.merge(open_lines, on='Sales Rep', how='left')
     health['Open SO Lines'] = health['Open SO Lines'].fillna(0).astype(int)
     
     return health
 
 def invoice_lag_analysis(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Average invoice lag per Sales Rep
-    Only for invoiced lines
-    """
+    """Average invoice lag per Sales Rep"""
     invoiced = df[df['actual_revenue_billed'] > 0].copy()
     
     if invoiced.empty:
@@ -368,9 +345,7 @@ def invoice_lag_analysis(df: pd.DataFrame) -> pd.DataFrame:
     return lag.sort_values('Avg Invoice Lag (Days)', ascending=False)
 
 def invoice_status_breakdown(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Count of SO lines by invoice status per Sales Rep
-    """
+    """Count of SO lines by invoice status per Sales Rep"""
     breakdown = df.groupby('sales_rep_master').agg({
         'is_fully_invoiced': 'sum',
         'is_partially_invoiced': 'sum',
