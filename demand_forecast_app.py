@@ -190,20 +190,16 @@ def prepare_data(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     
     # ═══ RULE 1: Sales Rep Master ═══
-    # Use Inv - Rep Master if not null, else SO - Rep Master
-    df['sales_rep_master'] = np.where(
-        df['Inv - Rep Master'].notna(),
-        df['Inv - Rep Master'],
-        df['SO - Rep Master']
-    )
+    # Start with SO - Rep Master, then overwrite with Inv - Rep Master where it exists
+    df['sales_rep_master'] = df['SO - Rep Master'].copy()
+    mask = df['Inv - Rep Master'].notna()
+    df.loc[mask, 'sales_rep_master'] = df.loc[mask, 'Inv - Rep Master']
     
     # ═══ RULE 2: Customer Corrected ═══
-    # Use Inv - Correct Customer if not null, else SO - Customer Companyname
-    df['customer_corrected'] = np.where(
-        df['Inv - Correct Customer'].notna(),
-        df['Inv - Correct Customer'],
-        df['SO - Customer Companyname']
-    )
+    # Start with SO - Customer Companyname, then overwrite with Inv - Correct Customer where it exists
+    df['customer_corrected'] = df['SO - Customer Companyname'].copy()
+    mask2 = df['Inv - Correct Customer'].notna()
+    df.loc[mask2, 'customer_corrected'] = df.loc[mask2, 'Inv - Correct Customer']
     
     # ═══ Date Parsing ═══
     date_cols = {
