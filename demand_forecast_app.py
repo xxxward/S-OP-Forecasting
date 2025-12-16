@@ -337,13 +337,20 @@ def _coerce_df(df: pd.DataFrame) -> pd.DataFrame:
 @st.cache_data(ttl=60 * 60, show_spinner=False)
 def load_tab(sheet_id: str, tab: str) -> pd.DataFrame:
     mode, client = _gsheets_client()
+    
+    # Special handling for Deals tab - headers are in row 2
+    header_row_idx = 1 if tab == "Deals" else 0
+    data_start_idx = header_row_idx + 1
+    
     if mode == "gspread":
         sh = client.open_by_key(sheet_id)
         ws = sh.worksheet(tab)
         vals = ws.get_all_values()
         if not vals:
             return pd.DataFrame()
-        df = pd.DataFrame(vals[1:], columns=vals[0])
+        if len(vals) <= header_row_idx:
+            return pd.DataFrame()
+        df = pd.DataFrame(vals[data_start_idx:], columns=vals[header_row_idx])
         return _coerce_df(df)
     # googleapiclient
     rng = f"'{tab}'"
@@ -351,7 +358,9 @@ def load_tab(sheet_id: str, tab: str) -> pd.DataFrame:
     vals = res.get("values", [])
     if not vals:
         return pd.DataFrame()
-    df = pd.DataFrame(vals[1:], columns=vals[0])
+    if len(vals) <= header_row_idx:
+        return pd.DataFrame()
+    df = pd.DataFrame(vals[data_start_idx:], columns=vals[header_row_idx])
     return _coerce_df(df)
 
 
@@ -640,6 +649,15 @@ class ForecastConfig:
 
 def forecast_exp(y: pd.Series, cfg: ForecastConfig) -> Tuple[pd.Series, Dict[str, Any]]:
     y = pd.to_numeric(y, errors="coerce").fillna(0.0)
+    
+    # Minimum data check - need at least 2 points for exponential smoothing
+    if len(y) < 2:
+        st.warning(f"Not enough data points ({len(y)}) for exponential smoothing. Need at least 2.")
+        # Return naive forecast (repeat last value)
+        last_val = y.iloc[-1] if len(y) > 0 else 0.0
+        fc = pd.Series([last_val] * cfg.horizon, index=pd.period_range(y.index[-1] + 1, periods=cfg.horizon, freq=cfg.freq))
+        return fc, {"method": "naive", "reason": "insufficient_data"}
+    
     if cfg.winsorize:
         y = _winsorize(y, cfg.lo_q, cfg.hi_q)
     y = _as_ts(y, cfg.freq)
