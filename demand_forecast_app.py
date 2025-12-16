@@ -473,20 +473,33 @@ def load_data() -> Dict[str, pd.DataFrame]:
         from google.oauth2.service_account import Credentials
         import gspread
 
-        if "gcp_service_account" not in st.secrets:
-            raise ValueError("Missing credentials")
+        # Try multiple credential configurations
+        creds_dict = None
+        if "gcp_service_account" in st.secrets:
+            creds_dict = dict(st.secrets["gcp_service_account"])
+        elif "service_account" in st.secrets:
+            creds_dict = dict(st.secrets["service_account"])
+        elif "gsheets" in st.secrets and "service_account" in st.secrets["gsheets"]:
+            creds_dict = dict(st.secrets["gsheets"]["service_account"])
+        else:
+            raise ValueError("Missing Google credentials. Add [gcp_service_account] to secrets.toml")
         
-        sheet_id = st.secrets.get("SPREADSHEET_ID") or st.secrets.get("gsheets", {}).get("spreadsheet_id")
+        # Try multiple sheet ID configurations
+        sheet_id = None
+        if "SPREADSHEET_ID" in st.secrets:
+            sheet_id = st.secrets["SPREADSHEET_ID"]
+        elif "gsheets" in st.secrets:
+            gsheets = st.secrets["gsheets"]
+            sheet_id = gsheets.get("spreadsheet_id") or gsheets.get("sheet_id")
+        
         if not sheet_id:
-            raise ValueError("Missing sheet ID")
+            raise ValueError("Missing spreadsheet ID. Add SPREADSHEET_ID to secrets.toml")
 
         scope = [
             "https://www.googleapis.com/auth/spreadsheets",
             "https://www.googleapis.com/auth/drive"
         ]
-        creds = Credentials.from_service_account_info(
-            dict(st.secrets["gcp_service_account"]), scopes=scope
-        )
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
         client = gspread.authorize(creds)
         sh = client.open_by_key(sheet_id)
         
@@ -525,7 +538,8 @@ def load_data() -> Dict[str, pd.DataFrame]:
         progress.empty()
         return data
     except Exception as e:
-        st.error(f"❌ {e}")
+        st.error(f"❌ Data Loading Error: {e}")
+        st.info("💡 Check your .streamlit/secrets.toml configuration")
         st.stop()
 
 # ══════════════════════════════════════════════════════════════════════════════
