@@ -307,6 +307,7 @@ def revenue_forecast_by_rep(df: pd.DataFrame) -> pd.DataFrame:
 
 def pipeline_health_by_rep(df: pd.DataFrame) -> pd.DataFrame:
     """Pipeline Health per Sales Rep"""
+    # Create the base Health dataframe
     health = df.groupby('sales_rep_master').agg({
         'so_amount': 'sum',
         'actual_revenue_billed': 'sum',
@@ -321,12 +322,20 @@ def pipeline_health_by_rep(df: pd.DataFrame) -> pd.DataFrame:
     health['% Remaining'] = (health['Remaining Revenue'] / health['Total Planned Revenue'] * 100).fillna(0)
     
     # Count open SO lines (not fully invoiced)
-    open_lines = df[~df['is_fully_invoiced']].groupby('sales_rep_master').size().reset_index(name='Open SO Lines')
+    open_lines_series = df[~df['is_fully_invoiced']].groupby('sales_rep_master').size()
+    open_lines = open_lines_series.reset_index(name='Open SO Lines')
     
-    # ═══ FIX: Rename column to match 'health' dataframe before merge ═══
-    open_lines.rename(columns={'sales_rep_master': 'Sales Rep'}, inplace=True)
+    # ═══ ROBUST MERGE ═══
+    health = health.merge(
+        open_lines, 
+        left_on='Sales Rep', 
+        right_on='sales_rep_master', 
+        how='left'
+    )
     
-    health = health.merge(open_lines, on='Sales Rep', how='left')
+    if 'sales_rep_master' in health.columns:
+        health = health.drop(columns=['sales_rep_master'])
+        
     health['Open SO Lines'] = health['Open SO Lines'].fillna(0).astype(int)
     
     return health
@@ -360,38 +369,43 @@ def invoice_status_breakdown(df: pd.DataFrame) -> pd.DataFrame:
 # VISUALIZATION
 # ══════════════════════════════════════════════════════════════════════════════
 
-def create_revenue_forecast_chart(forecast_df: pd.DataFrame, selected_rep: str):
-    """Create revenue forecast chart for selected rep"""
-    rep_data = forecast_df[forecast_df['Sales Rep'] == selected_rep]
-    
-    if rep_data.empty:
+def create_revenue_forecast_chart(forecast_df: pd.DataFrame, title_suffix: str = ""):
+    """Create revenue forecast chart"""
+    if forecast_df.empty:
         return None
-    
+        
     fig = go.Figure()
     
+    # Group by month for the chart if multiple reps are present
+    monthly_data = forecast_df.groupby('Month').agg({
+        'Planned Revenue': 'sum',
+        'Actual Revenue': 'sum',
+        'Remaining Revenue': 'sum'
+    }).reset_index()
+    
     fig.add_trace(go.Bar(
-        x=rep_data['Month'],
-        y=rep_data['Planned Revenue'],
+        x=monthly_data['Month'],
+        y=monthly_data['Planned Revenue'],
         name='Planned',
         marker_color='rgba(102, 126, 234, 0.7)'
     ))
     
     fig.add_trace(go.Bar(
-        x=rep_data['Month'],
-        y=rep_data['Actual Revenue'],
+        x=monthly_data['Month'],
+        y=monthly_data['Actual Revenue'],
         name='Actual',
         marker_color='rgba(79, 172, 254, 0.9)'
     ))
     
     fig.add_trace(go.Bar(
-        x=rep_data['Month'],
-        y=rep_data['Remaining Revenue'],
+        x=monthly_data['Month'],
+        y=monthly_data['Remaining Revenue'],
         name='Remaining',
         marker_color='rgba(245, 87, 108, 0.7)'
     ))
     
     fig.update_layout(
-        title=f'Revenue Forecast - {selected_rep}',
+        title=f'Revenue Forecast {title_suffix}',
         barmode='group',
         plot_bgcolor='rgba(0,0,0,0)',
         paper_bgcolor='rgba(0,0,0,0)',
@@ -483,23 +497,6 @@ def create_invoice_status_chart(status_df: pd.DataFrame):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main():
-    # Sidebar
-    with st.sidebar:
-        st.markdown("## ⚙️ Filters")
-        st.markdown("---")
-        
-        st.markdown("### Data Source")
-        st.info(f"📊 {SHEET_NAME}")
-        
-        st.markdown("---")
-        st.markdown("### 📡 Status")
-        st.success("✓ Connected")
-        st.caption(f"Updated: {datetime.now().strftime('%I:%M %p')}")
-    
-    # Header
-    st.markdown('<h1>📊 Sales Rep Planning & Forecasting</h1>', unsafe_allow_html=True)
-    st.markdown('<p style="color: rgba(255,255,255,0.8); font-size: 1.2rem;">Merged SO & Invoice Analysis</p>', unsafe_allow_html=True)
-    
     # Load data
     with st.spinner("🔮 Loading merged data..."):
         raw_df = load_data()
@@ -510,18 +507,90 @@ def main():
     
     # Prepare data
     df = prepare_data(raw_df)
-    
     if df.empty:
         st.error("🚫 No data after filtering")
         st.stop()
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # SIDEBAR CASCADING FILTERS
+    # ══════════════════════════════════════════════════════════════════════════
     
-    # Get unique sales reps
-    sales_reps = sorted(df['sales_rep_master'].unique())
+    with st.sidebar:
+        st.markdown("## ⚙️ Filters")
+        st.caption("Filters cascade top to bottom")
+        st.markdown("---")
+        
+        # 1. SALES REP FILTER
+        # Get all unique reps and add "All" option
+        all_reps = sorted(df['sales_rep_master'].astype(str).unique().tolist())
+        selected_rep = st.selectbox("👤 Sales Rep", ["All"] + all_reps)
+        
+        # Filter DF based on Rep selection
+        if selected_rep != "All":
+            df_filtered = df[df['sales_rep_master'] == selected_rep]
+        else:
+            df_filtered = df.copy()
+            
+        # 2. CUSTOMER FILTER (Dependent on Rep)
+        # Get customers available in the *filtered* dataframe
+        available_customers = sorted(df_filtered['customer_corrected'].dropna().astype(str).unique().tolist())
+        selected_customer = st.selectbox("🏢 Customer", ["All"] + available_customers)
+        
+        # Filter DF based on Customer selection
+        if selected_customer != "All":
+            df_filtered = df_filtered[df_filtered['customer_corrected'] == selected_customer]
+
+        # 3. PRODUCT TYPE FILTER (Dependent on Customer)
+        # Check if column exists first
+        if 'SO - Calyx || Product Type' in df_filtered.columns:
+            available_types = sorted(df_filtered['SO - Calyx || Product Type'].dropna().astype(str).unique().tolist())
+            selected_type = st.selectbox("📦 Product Type", ["All"] + available_types)
+            
+            if selected_type != "All":
+                df_filtered = df_filtered[df_filtered['SO - Calyx || Product Type'] == selected_type]
+
+        # 4. ITEM FILTER (Dependent on Product Type)
+        # Using selectbox allows typing to search
+        if 'SO - Item' in df_filtered.columns:
+            available_items = sorted(df_filtered['SO - Item'].dropna().astype(str).unique().tolist())
+            selected_item = st.selectbox("🔎 Item", ["All"] + available_items)
+            
+            if selected_item != "All":
+                df_filtered = df_filtered[df_filtered['SO - Item'] == selected_item]
+
+        st.markdown("---")
+        st.markdown(f"**Records Found:** {len(df_filtered)}")
+        
+        st.markdown("---")
+        st.markdown("### Data Source")
+        st.info(f"📊 {SHEET_NAME}")
+        st.success("✓ Connected")
+        st.caption(f"Updated: {datetime.now().strftime('%I:%M %p')}")
     
+    # ══════════════════════════════════════════════════════════════════════════
+    # MAIN CONTENT
+    # ══════════════════════════════════════════════════════════════════════════
+
+    st.markdown('<h1>📊 Sales Rep Planning & Forecasting</h1>', unsafe_allow_html=True)
+    
+    # Dynamic subtitle based on selection
+    subtitle = "Analysis: All Reps"
+    if selected_rep != "All":
+        subtitle = f"Analysis: {selected_rep}"
+    if selected_customer != "All":
+        subtitle += f" > {selected_customer}"
+        
+    st.markdown(f'<p style="color: rgba(255,255,255,0.8); font-size: 1.2rem;">{subtitle}</p>', unsafe_allow_html=True)
+    
+    # Check if we filtered everything away
+    if df_filtered.empty:
+        st.warning("⚠️ No data matches your filter selection.")
+        st.stop()
+
     # ═══ TOP METRICS ═══
-    total_planned = df['so_amount'].sum()
-    total_actual = df['actual_revenue_billed'].sum()
-    total_remaining = df['revenue_remaining'].sum()
+    total_planned = df_filtered['so_amount'].sum()
+    total_actual = df_filtered['actual_revenue_billed'].sum()
+    total_remaining = df_filtered['revenue_remaining'].sum()
     pct_invoiced = (total_actual / total_planned * 100) if total_planned > 0 else 0
     
     col1, col2, col3, col4 = st.columns(4)
@@ -534,52 +603,63 @@ def main():
     
     # ═══ ANALYTICS SECTIONS ═══
     
-    # 1. Revenue Forecast by Rep
-    st.markdown("## 📈 Revenue Forecast by Sales Rep")
+    # 1. Revenue Forecast
+    st.markdown("## 📈 Revenue Forecast")
     
-    selected_rep = st.selectbox("👤 Select Sales Rep", sales_reps)
+    forecast_df = revenue_forecast_by_rep(df_filtered)
     
-    forecast_df = revenue_forecast_by_rep(df)
-    fig_forecast = create_revenue_forecast_chart(forecast_df, selected_rep)
+    # If a single rep is selected, we show that rep's chart.
+    # If "All" reps are selected, we show the aggregate chart.
+    title_suffix = f"- {selected_rep}" if selected_rep != "All" else "- Aggregate"
+    fig_forecast = create_revenue_forecast_chart(forecast_df, title_suffix)
     
     if fig_forecast:
         st.plotly_chart(fig_forecast, use_container_width=True)
     
     # Show table
-    rep_forecast = forecast_df[forecast_df['Sales Rep'] == selected_rep]
-    if not rep_forecast.empty:
-        rep_forecast['Month'] = rep_forecast['Month'].dt.strftime('%b %Y')
-        rep_forecast['Planned Revenue'] = rep_forecast['Planned Revenue'].apply(lambda x: f"${x:,.0f}")
-        rep_forecast['Actual Revenue'] = rep_forecast['Actual Revenue'].apply(lambda x: f"${x:,.0f}")
-        rep_forecast['Remaining Revenue'] = rep_forecast['Remaining Revenue'].apply(lambda x: f"${x:,.0f}")
-        st.dataframe(rep_forecast[['Month', 'Planned Revenue', 'Actual Revenue', 'Remaining Revenue']], 
+    if not forecast_df.empty:
+        forecast_display = forecast_df.copy()
+        forecast_display['Month'] = forecast_display['Month'].dt.strftime('%b %Y')
+        forecast_display['Planned Revenue'] = forecast_display['Planned Revenue'].apply(lambda x: f"${x:,.0f}")
+        forecast_display['Actual Revenue'] = forecast_display['Actual Revenue'].apply(lambda x: f"${x:,.0f}")
+        forecast_display['Remaining Revenue'] = forecast_display['Remaining Revenue'].apply(lambda x: f"${x:,.0f}")
+        
+        # If showing all, group by month for cleaner table
+        if selected_rep == "All":
+             st.dataframe(forecast_display[['Sales Rep', 'Month', 'Planned Revenue', 'Actual Revenue', 'Remaining Revenue']], 
+                     use_container_width=True, hide_index=True)
+        else:
+            st.dataframe(forecast_display[['Month', 'Planned Revenue', 'Actual Revenue', 'Remaining Revenue']], 
                      use_container_width=True, hide_index=True)
     
     st.markdown("---")
     
-    # 2. Pipeline Health
-    st.markdown("## 🎯 Pipeline Health by Sales Rep")
+    # 2. Pipeline Health (Only useful if multiple items/reps exist)
+    st.markdown("## 🎯 Pipeline Health")
     
-    health_df = pipeline_health_by_rep(df)
-    fig_health = create_pipeline_health_chart(health_df)
-    st.plotly_chart(fig_health, use_container_width=True)
-    
-    # Format table
-    health_display = health_df.copy()
-    health_display['Total Planned Revenue'] = health_display['Total Planned Revenue'].apply(lambda x: f"${x:,.0f}")
-    health_display['Actual Revenue'] = health_display['Actual Revenue'].apply(lambda x: f"${x:,.0f}")
-    health_display['Remaining Revenue'] = health_display['Remaining Revenue'].apply(lambda x: f"${x:,.0f}")
-    health_display['% Invoiced'] = health_display['% Invoiced'].apply(lambda x: f"{x:.1f}%")
-    health_display['% Remaining'] = health_display['% Remaining'].apply(lambda x: f"{x:.1f}%")
-    
-    st.dataframe(health_display, use_container_width=True, hide_index=True)
+    health_df = pipeline_health_by_rep(df_filtered)
+    if not health_df.empty:
+        fig_health = create_pipeline_health_chart(health_df)
+        st.plotly_chart(fig_health, use_container_width=True)
+        
+        # Format table
+        health_display = health_df.copy()
+        health_display['Total Planned Revenue'] = health_display['Total Planned Revenue'].apply(lambda x: f"${x:,.0f}")
+        health_display['Actual Revenue'] = health_display['Actual Revenue'].apply(lambda x: f"${x:,.0f}")
+        health_display['Remaining Revenue'] = health_display['Remaining Revenue'].apply(lambda x: f"${x:,.0f}")
+        health_display['% Invoiced'] = health_display['% Invoiced'].apply(lambda x: f"{x:.1f}%")
+        health_display['% Remaining'] = health_display['% Remaining'].apply(lambda x: f"{x:.1f}%")
+        
+        st.dataframe(health_display, use_container_width=True, hide_index=True)
+    else:
+        st.info("No data for pipeline health.")
     
     st.markdown("---")
     
     # 3. Invoice Lag Analysis
     st.markdown("## ⏱️ Invoice Lag Analysis")
     
-    lag_df = invoice_lag_analysis(df)
+    lag_df = invoice_lag_analysis(df_filtered)
     
     if not lag_df.empty:
         col_a, col_b = st.columns(2)
@@ -595,7 +675,7 @@ def main():
                 textposition='outside'
             ))
             fig_lag.update_layout(
-                title='Average Invoice Lag by Sales Rep',
+                title='Average Invoice Lag (Days)',
                 plot_bgcolor='rgba(0,0,0,0)',
                 paper_bgcolor='rgba(0,0,0,0)',
                 font=dict(color='white'),
@@ -615,11 +695,12 @@ def main():
     # 4. Invoice Status Breakdown
     st.markdown("## 📋 Invoice Status Breakdown")
     
-    status_df = invoice_status_breakdown(df)
-    fig_status = create_invoice_status_chart(status_df)
-    st.plotly_chart(fig_status, use_container_width=True)
-    
-    st.dataframe(status_df, use_container_width=True, hide_index=True)
+    status_df = invoice_status_breakdown(df_filtered)
+    if not status_df.empty:
+        fig_status = create_invoice_status_chart(status_df)
+        st.plotly_chart(fig_status, use_container_width=True)
+        
+        st.dataframe(status_df, use_container_width=True, hide_index=True)
 
 if __name__ == "__main__":
     main()
