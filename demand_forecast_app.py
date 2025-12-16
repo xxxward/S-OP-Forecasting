@@ -277,14 +277,42 @@ def _gsheets_client():
 
 
 def _coerce_df(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return df.copy()
-    df = df.copy()
-    df.columns = [str(c).strip() for c in df.columns]
+    """Safely coerce dataframe columns without assuming shape."""
+    if df is None:
+        return pd.DataFrame()
+
+    # If a Series somehow sneaks through, convert to DataFrame
+    if isinstance(df, pd.Series):
+        df = df.to_frame()
+
+    # Ensure columns are strings and unique
+    df.columns = (
+        pd.Series(df.columns)
+        .astype(str)
+        .str.strip()
+        .fillna("unknown")
+        .pipe(lambda s: pd.io.parsers.ParserBase({"names": s})._maybe_dedup_names(s))
+    )
+
     for c in df.columns:
-        if df[c].dtype == object:
-            df[c] = df[c].astype(str).str.strip().replace({"": np.nan, "None": np.nan, "nan": np.nan})
+        try:
+            col = df[c]
+
+            # If duplicate column -> DataFrame, skip dtype coercion
+            if isinstance(col, pd.DataFrame):
+                continue
+
+            if col.dtype == object:
+                # Try numeric
+                coerced = pd.to_numeric(col, errors="ignore")
+                df[c] = coerced
+
+        except Exception:
+            # Never hard-fail during coercion
+            continue
+
     return df
+
 
 
 @st.cache_data(ttl=60 * 60, show_spinner=False)
