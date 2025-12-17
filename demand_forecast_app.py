@@ -1,20 +1,17 @@
 """
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    CALYX - SALES PLANNING & FORECASTING TOOL (v3.3 - Stable)
-    Includes:
-    - Smart Cascading Filters (Rep -> Customer -> SKU)
-    - Hybrid Forecasting (Statistical + Machine Learning)
-    - Pipeline Allocation Logic (Category -> SKU)
-    - FIXED: Removed Matplotlib dependency for dataframe styling
+    CALYX - SALES ACTION CENTER (v4.1)
+    Focus:
+    1. 2025 Performance (Invoiced vs Pending)
+    2. 2026 Forecasting (Customer & SKU Level)
+    3. Robust Error Handling (Header Deduplication)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
-import plotly.express as px
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 from dateutil.relativedelta import relativedelta
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -22,39 +19,35 @@ from dateutil.relativedelta import relativedelta
 # ══════════════════════════════════════════════════════════════════════════════
 
 st.set_page_config(
-    page_title="Calyx Sales Planner",
-    page_icon="🚀",
+    page_title="Calyx Sales Rep View",
+    page_icon="💼",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS
+# Hardcoded timeline based on your prompt
+CURRENT_YEAR = 2025
+NEXT_YEAR = 2026
+
+# Custom CSS for "Clean Corporate" look
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
     * { font-family: 'Inter', sans-serif; }
     
-    .block-container { max-width: 1600px; padding-top: 2rem; }
-    
-    /* Metrics Cards */
-    .metric-card {
-        background: #ffffff;
-        border: 1px solid #e2e8f0;
+    .metric-container {
+        background-color: #ffffff;
+        border: 1px solid #e5e7eb;
         border-radius: 8px;
-        padding: 1.25rem;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.05);
-        margin-bottom: 1rem;
+        padding: 16px;
+        text-align: center;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.05);
     }
-    .metric-label { font-size: 0.8rem; color: #64748b; font-weight: 600; text-transform: uppercase; }
-    .metric-value { font-size: 1.8rem; color: #0f172a; font-weight: 700; margin: 0.2rem 0; }
+    .metric-label { font-size: 0.85rem; color: #6b7280; font-weight: 600; text-transform: uppercase; }
+    .metric-value { font-size: 1.8rem; color: #111827; font-weight: 700; margin-top: 4px; }
     
-    /* Table Styling */
-    [data-testid="stDataFrame"] { border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden; }
-    
-    h1, h2, h3 { color: #0f172a; }
-    .stTabs [data-baseweb="tab-list"] { gap: 24px; }
-    .stTabs [data-baseweb="tab"] { height: 50px; white-space: pre-wrap; background-color: white; border-radius: 4px; color: #64748b; }
-    .stTabs [aria-selected="true"] { background-color: #f1f5f9; color: #0f172a; font-weight: 600; }
+    h1, h2, h3 { color: #111827; }
+    [data-testid="stDataFrame"] { border: 1px solid #e5e7eb; border-radius: 8px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -62,22 +55,11 @@ SHEET_SO_INV = "SO & invoice Data merged"
 SHEET_DEALS = "Deals"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ADVANCED IMPORT HANDLING (Forecast Models)
-# ══════════════════════════════════════════════════════════════════════════════
-HAS_ML = False
-try:
-    from sklearn.ensemble import RandomForestRegressor
-    from statsmodels.tsa.holtwinters import ExponentialSmoothing
-    HAS_ML = True
-except ImportError:
-    HAS_ML = False
-
-# ══════════════════════════════════════════════════════════════════════════════
-# DATA LOADING HELPER FUNCTIONS
+# DATA LOADING & PREP (ROBUST)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def deduplicate_headers(headers):
-    """Ensures all headers are unique by appending _1, _2, etc."""
+    """Ensures all headers are unique."""
     deduped = []
     counts = {}
     for h in headers:
@@ -91,523 +73,397 @@ def deduplicate_headers(headers):
     return deduped
 
 def safe_get_col(df, candidates, default_val='Unknown'):
-    """Tries multiple column names, returns the first one found as a SERIES."""
     for col in candidates:
-        # Case-insensitive matching
         matches = [c for c in df.columns if c.strip().lower() == col.strip().lower()]
-        if matches:
-            return df[matches[0]]
-            
-    # If not found, return default series
+        if matches: return df[matches[0]]
     return pd.Series([default_val] * len(df), index=df.index)
 
 @st.cache_data(ttl=3600)
-def load_data():
-    """Load and Prep Data with Fuzzy Matching for Pipeline"""
+def load_and_prep_data():
     try:
         from google.oauth2.service_account import Credentials
         import gspread
 
-        # Connect to Google Sheets
+        # Connect
         creds_dict = None
         if "gcp_service_account" in st.secrets:
             creds_dict = dict(st.secrets["gcp_service_account"])
         elif "service_account" in st.secrets:
             creds_dict = dict(st.secrets["service_account"])
         else:
-            st.error("Missing Google Credentials in Secrets.")
-            return pd.DataFrame(), pd.DataFrame()
+            return None, None
 
         scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
         creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
         client = gspread.authorize(creds)
         
-        sheet_id = None
-        if "SPREADSHEET_ID" in st.secrets:
-            sheet_id = st.secrets["SPREADSHEET_ID"]
-        elif "gsheets" in st.secrets:
-            sheet_id = st.secrets["gsheets"].get("spreadsheet_id")
-            
-        if not sheet_id:
-            st.error("Missing Spreadsheet ID in Secrets.")
-            return pd.DataFrame(), pd.DataFrame()
-
+        sheet_id = st.secrets.get("SPREADSHEET_ID") or st.secrets["gsheets"]["spreadsheet_id"]
         sh = client.open_by_key(sheet_id)
 
-        # 1. LOAD SO DATA
+        # 1. LOAD SO/INV DATA
         try:
-            ws_so = sh.worksheet(SHEET_SO_INV)
-            rows_so = ws_so.get_all_values()
-            
-            if len(rows_so) < 2:
-                st.warning(f"Sheet '{SHEET_SO_INV}' seems empty.")
-                df_so = pd.DataFrame()
-            else:
-                # --- DEDUPLICATE HEADERS ---
-                headers = deduplicate_headers(rows_so[0])
-                df_so = pd.DataFrame(rows_so[1:], columns=headers)
-        except Exception as e:
-            st.error(f"Could not load sheet '{SHEET_SO_INV}': {e}")
-            df_so = pd.DataFrame()
+            ws = sh.worksheet(SHEET_SO_INV)
+            rows = ws.get_all_values()
+            df_main = pd.DataFrame(rows[1:], columns=deduplicate_headers(rows[0])) if len(rows) > 1 else pd.DataFrame()
+        except:
+            df_main = pd.DataFrame()
 
-        # 2. LOAD DEALS DATA
+        # 2. LOAD DEALS
         try:
-            ws_deals = sh.worksheet(SHEET_DEALS)
-            rows_deals = ws_deals.get_all_values()
-            if len(rows_deals) < 3:
-                st.warning(f"Sheet '{SHEET_DEALS}' seems empty or malformed.")
-                df_deals = pd.DataFrame()
-            else:
-                # Headers are in Row 2 (index 1), Data starts Row 3 (index 2)
-                # --- DEDUPLICATE HEADERS ---
-                headers = deduplicate_headers(rows_deals[1])
-                df_deals = pd.DataFrame(rows_deals[2:], columns=headers)
-        except Exception as e:
-            st.error(f"Could not load sheet '{SHEET_DEALS}': {e}")
+            ws_d = sh.worksheet(SHEET_DEALS)
+            rows_d = ws_d.get_all_values()
+            df_deals = pd.DataFrame(rows_d[2:], columns=deduplicate_headers(rows_d[1])) if len(rows_d) > 2 else pd.DataFrame()
+        except:
             df_deals = pd.DataFrame()
 
-        # --- PRE-PROCESSING SO ---
-        if not df_so.empty:
-            
-            # Safe Column Extraction
-            # Rep: Try multiple variations
-            rep_inv = safe_get_col(df_so, ['Inv - Rep Master', 'Inv-Rep Master', 'Rep Master'])
-            rep_so = safe_get_col(df_so, ['SO - Rep Master', 'SO-Rep Master', 'Rep'])
-            
-            # Combine series (safe now that headers are unique)
-            df_so['Rep'] = rep_inv.replace('', np.nan).combine_first(rep_so.replace('', np.nan)).fillna('Unassigned').astype(str).str.strip()
-            
-            # Customer
-            cust_inv = safe_get_col(df_so, ['Inv - Correct Customer', 'Correct Customer'])
-            cust_so = safe_get_col(df_so, ['SO - Customer Companyname', 'Customer Companyname', 'Customer'])
-            df_so['Customer'] = cust_inv.replace('', np.nan).combine_first(cust_so.replace('', np.nan)).fillna('Unknown').astype(str).str.strip()
-            
-            # Item & Type
-            df_so['Item'] = safe_get_col(df_so, ['SO - Item', 'Item']).astype(str).str.strip()
-            df_so['Product Type'] = safe_get_col(df_so, ['SO - Calyx || Product Type', 'Product Type']).astype(str).str.strip()
+        # --- PREP MAIN DATA ---
+        if not df_main.empty:
+            # Columns
+            df_main['Rep'] = safe_get_col(df_main, ['Inv - Rep Master', 'SO - Rep Master']).fillna('Unassigned').astype(str).str.strip()
+            df_main['Customer'] = safe_get_col(df_main, ['Inv - Correct Customer', 'SO - Customer Companyname']).fillna('Unknown').astype(str).str.strip()
+            df_main['Item'] = safe_get_col(df_main, ['SO - Item', 'Item']).astype(str).str.strip()
+            df_main['Product Type'] = safe_get_col(df_main, ['SO - Calyx || Product Type', 'Product Type']).astype(str).str.strip()
+            df_main['SO_Num'] = safe_get_col(df_main, ['SO - Document Number', 'Document Number']).astype(str).str.strip()
             
             # Dates
-            date_inv = pd.to_datetime(safe_get_col(df_so, ['Inv - Date', 'Date']), errors='coerce')
-            date_so = pd.to_datetime(safe_get_col(df_so, ['SO - Date Created', 'Date Created']), errors='coerce')
-            df_so['Date'] = date_inv.combine_first(date_so)
+            df_main['Inv_Date'] = pd.to_datetime(safe_get_col(df_main, ['Inv - Date']), errors='coerce')
+            df_main['SO_Date'] = pd.to_datetime(safe_get_col(df_main, ['SO - Date Created', 'Date Created']), errors='coerce')
+            
+            # Use Pending Fulfillment Date for future SOs
+            df_main['Fulfill_Date'] = pd.to_datetime(safe_get_col(df_main, ['SO - Pending Fulfillment Date']), errors='coerce')
             
             # Amounts
-            def clean_money(series):
-                return pd.to_numeric(series.astype(str).str.replace(r'[$,]', '', regex=True), errors='coerce').fillna(0)
-                
-            df_so['Amount'] = clean_money(safe_get_col(df_so, ['Inv - Amount', 'Amount']))
-            df_so['Qty'] = clean_money(safe_get_col(df_so, ['SO - Quantity Ordered', 'Quantity Ordered', 'Qty']))
+            def clean_money(s): return pd.to_numeric(s.astype(str).str.replace(r'[$,]', '', regex=True), errors='coerce').fillna(0)
+            df_main['Amount'] = clean_money(safe_get_col(df_main, ['Inv - Amount', 'Amount']))
             
-            # Filter valid rows
-            df_so = df_so[df_so['Amount'] > 0].copy()
+            # Logic: Split Invoiced vs Pending
+            df_main['Type'] = np.where(df_main['Inv_Date'].notnull(), 'Invoiced', 'Pending SO')
+            
+            df_main['Effective_Date'] = np.where(
+                df_main['Type'] == 'Invoiced', 
+                df_main['Inv_Date'], 
+                df_main['Fulfill_Date'].combine_first(df_main['SO_Date'])
+            )
+            
+            df_main = df_main[df_main['Amount'] > 0]
 
-        # --- PRE-PROCESSING DEALS ---
+        # --- PREP DEALS ---
         if not df_deals.empty:
-            
             # Filter Include?
-            include_col = safe_get_col(df_deals, ['Include?', 'Include'])
-            # Only keep rows where Include is True-ish
-            keep_mask = include_col.astype(str).str.upper().isin(['TRUE', 'YES', '1'])
-            df_deals = df_deals[keep_mask].copy()
+            inc = safe_get_col(df_deals, ['Include?', 'Include'])
+            df_deals = df_deals[inc.astype(str).str.upper().isin(['TRUE', 'YES', '1'])].copy()
             
-            # Columns
-            df_deals['Deal Name'] = safe_get_col(df_deals, ['Deal Name']).astype(str).str.strip()
-            
-            amt_col = safe_get_col(df_deals, ['Amount'])
-            df_deals['Amount'] = pd.to_numeric(amt_col.astype(str).str.replace(r'[$,]', '', regex=True), errors='coerce').fillna(0)
-            
-            date_col = safe_get_col(df_deals, ['Close Date'])
-            df_deals['Close Date'] = pd.to_datetime(date_col, errors='coerce')
-            
-            # Construct Rep Name
+            # Rep & Amt
             first = safe_get_col(df_deals, ['Deal Owner First Name']).astype(str)
             last = safe_get_col(df_deals, ['Deal Owner Last Name']).astype(str)
             df_deals['Rep'] = (first + " " + last).str.strip().str.replace('None None', 'Unassigned')
             
-            df_deals['Stage'] = safe_get_col(df_deals, ['Deal Stage', 'Stage']).astype(str).str.strip()
-
-            # --- FUZZY MATCHING PIPELINE TO CUSTOMERS ---
-            unique_customers = []
-            if not df_so.empty:
-                unique_customers = df_so['Customer'].dropna().unique()
+            df_deals['Amount'] = clean_money(safe_get_col(df_deals, ['Amount']))
+            df_deals['Close Date'] = pd.to_datetime(safe_get_col(df_deals, ['Close Date']), errors='coerce')
+            df_deals['Stage'] = safe_get_col(df_deals, ['Deal Stage', 'Stage'])
+            df_deals['Deal Name'] = safe_get_col(df_deals, ['Deal Name'])
             
-            # Simple matching logic
-            def match_customer(deal_name):
-                if not deal_name or deal_name.lower() == 'nan': return "Unassigned"
-                deal_name_upper = deal_name.upper()
-                # Sort customers by length desc to match "Target" before "Target Corp"
-                for cust in sorted(unique_customers, key=len, reverse=True):
-                    if len(cust) > 3 and cust.upper() in deal_name_upper:
-                        return cust
+            # Customer Matching
+            unique_cust = df_main['Customer'].unique() if not df_main.empty else []
+            def match(name):
+                name_up = str(name).upper()
+                for c in sorted(unique_cust, key=len, reverse=True):
+                    if len(c) > 3 and c.upper() in name_up: return c
                 return "Unassigned"
+            df_deals['Matched_Customer'] = df_deals['Deal Name'].apply(match)
 
-            if len(unique_customers) > 0:
-                df_deals['Matched_Customer'] = df_deals['Deal Name'].apply(match_customer)
-            else:
-                df_deals['Matched_Customer'] = "Unassigned"
-
-        return df_so, df_deals
-
+        return df_main, df_deals
+        
     except Exception as e:
-        # If all else fails, show the error but return empty so app doesn't crash completely
-        st.error(f"Critical Data Loading Error: {e}")
+        st.error(f"Data Load Error: {e}")
         return pd.DataFrame(), pd.DataFrame()
 
 # ══════════════════════════════════════════════════════════════════════════════
-# FORECASTING ENGINE
+# FORECAST GENERATOR LOGIC (Client + SKU Level)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def generate_forecast(history_df, horizon_months=12, model_type='Exponential Smoothing'):
+def generate_detailed_forecast(df_hist, df_pipe, granularity='Customer', year_target=2026):
     """
-    Generates a forecast for a specific SKU/Customer series.
-    Input: DataFrame with index=Date, value=Qty
+    Builds a forecast table.
+    Granularity can be 'Customer' or 'Item' (SKU).
     """
-    # Resample to Monthly
-    series = history_df.resample('ME')['Qty'].sum().fillna(0)
+    forecast_rows = []
     
-    # Generate future dates
-    last_date = series.index[-1] if not series.empty else datetime.now()
-    future_dates = [last_date + relativedelta(months=i+1) for i in range(horizon_months)]
+    # Identify entities based on granularity
+    if granularity == 'Customer':
+        entities = set(df_hist['Customer'].unique()) | set(df_pipe['Matched_Customer'].unique())
+        key_col = 'Customer'
+        pipe_col = 'Matched_Customer'
+    else: # Item / Product Level
+        # Note: Pipeline deals don't always have Items, so we may show 'General Pipeline' for unmatched deals
+        entities = set(df_hist['Item'].unique())
+        key_col = 'Item'
+        # Pipeline matching to SKU is hard without direct link. 
+        # We will group by Item for history, and add a separate row for 'Pipeline (Allocated)' if we wanted to get fancy.
+        # For simplicity in this view, we'll focus on Historical Run Rate for SKU, 
+        # and assume Deals are separate unless we build that complex allocator back.
+        pipe_col = None 
+        
+    entities.discard('Unassigned')
+    entities.discard('Unknown')
     
-    if len(series) < 3:
-        # Not enough data, return simple average
-        avg_val = series.mean() if len(series) > 0 else 0
-        return pd.Series([avg_val]*horizon_months, index=future_dates)
-
-    forecast_values = []
-
-    # MODEL A: EXPONENTIAL SMOOTHING (Statsmodels)
-    if model_type == 'Exponential Smoothing' and HAS_ML:
-        try:
-            model = ExponentialSmoothing(series, trend='add', seasonal=None, initialization_method="estimated").fit()
-            forecast_values = model.forecast(horizon_months)
-            return pd.Series(forecast_values, index=future_dates)
-        except:
-            pass # Fallback
-
-    # MODEL B: MACHINE LEARNING (Random Forest)
-    if model_type == 'Machine Learning (RF)' and HAS_ML:
-        try:
-            df_ml = pd.DataFrame({'y': series})
-            for lag in [1, 2, 3]:
-                df_ml[f'lag_{lag}'] = df_ml['y'].shift(lag)
-            df_ml = df_ml.dropna()
+    for entity in sorted(entities):
+        # 1. Historicals (2025)
+        hist_rows = df_hist[df_hist[key_col] == entity]
+        rev_2025 = hist_rows[hist_rows['Effective_Date'].dt.year == 2025]['Amount'].sum()
+        
+        # 2. Pipeline (2026)
+        # Only applicable if we can link pipeline to the entity
+        pipe_2026_val = 0
+        if granularity == 'Customer' and pipe_col:
+            pipe_rows = df_pipe[df_pipe[pipe_col] == entity]
+            pipe_2026_val = pipe_rows[pipe_rows['Close Date'].dt.year == year_target]['Amount'].sum()
             
-            if len(df_ml) > 5:
-                X = df_ml.drop('y', axis=1)
-                y = df_ml['y']
-                rf = RandomForestRegressor(n_estimators=100, random_state=42)
-                rf.fit(X, y)
-                
-                # Simple recursive forecast
-                last_row = df_ml.iloc[[-1]].drop('y', axis=1).copy()
-                preds = []
-                for _ in range(horizon_months):
-                    pred = rf.predict(last_row)[0]
-                    preds.append(pred)
-                    # Shift logic (simple approximation for demo)
-                    new_row = last_row.copy()
-                    new_row['lag_1'] = pred
-                    new_row['lag_2'] = last_row['lag_1'].values[0]
-                    new_row['lag_3'] = last_row['lag_2'].values[0]
-                    last_row = new_row
-                return pd.Series(preds, index=future_dates)
-        except:
-            pass
+            # Quarterly pipe breakdown
+            p_q1 = pipe_rows[(pipe_rows['Close Date'].dt.year == year_target) & (pipe_rows['Close Date'].dt.quarter == 1)]['Amount'].sum()
+            p_q2 = pipe_rows[(pipe_rows['Close Date'].dt.year == year_target) & (pipe_rows['Close Date'].dt.quarter == 2)]['Amount'].sum()
+            p_q3 = pipe_rows[(pipe_rows['Close Date'].dt.year == year_target) & (pipe_rows['Close Date'].dt.quarter == 3)]['Amount'].sum()
+            p_q4 = pipe_rows[(pipe_rows['Close Date'].dt.year == year_target) & (pipe_rows['Close Date'].dt.quarter == 4)]['Amount'].sum()
+        else:
+            # SKU level pipeline is unknown, assume flat 0 or purely historical run rate
+            p_q1, p_q2, p_q3, p_q4 = 0, 0, 0, 0
 
-    # FALLBACK: WEIGHTED MOVING AVERAGE
-    weights = np.array([0.4, 0.3, 0.2, 0.1])
-    recent_vals = series.iloc[-4:].values
-    if len(recent_vals) < 4:
-        weights = weights[:len(recent_vals)]
-        weights /= weights.sum()
-    
-    wma = np.dot(recent_vals[::-1], weights)
-    return pd.Series([wma]*horizon_months, index=future_dates)
+        # 3. Baseline Logic (Flat Run Rate / 4)
+        # This answers: "If they do exactly what they did last year"
+        baseline_q = rev_2025 / 4
+        
+        q1 = baseline_q + p_q1
+        q2 = baseline_q + p_q2
+        q3 = baseline_q + p_q3
+        q4 = baseline_q + p_q4
+        
+        if (rev_2025 + q1 + q2 + q3 + q4) > 0: # Only show active items/customers
+            row = {
+                key_col: entity,
+                "2025 Actuals": rev_2025,
+                f"Q1 {year_target}": q1,
+                f"Q2 {year_target}": q2,
+                f"Q3 {year_target}": q3,
+                f"Q4 {year_target}": q4,
+                f"Total {year_target}": q1+q2+q3+q4
+            }
+            forecast_rows.append(row)
+        
+    return pd.DataFrame(forecast_rows)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# MAIN APP LOGIC
+# MAIN APP
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main():
-    # Load Data
-    with st.spinner("Initializing Planning Engine..."):
-        df_so, df_deals = load_data()
+    
+    # LOAD
+    with st.spinner("Loading Sales Data..."):
+        df_main, df_deals = load_and_prep_data()
 
-    if df_so.empty:
-        st.error("No historical data available. Please check column headers in your Google Sheet.")
-        if st.button("Retry Loading"):
-            st.rerun()
+    if df_main.empty:
+        st.error("No data found.")
         st.stop()
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # SMART CASCADING SIDEBAR
-    # ══════════════════════════════════════════════════════════════════════════
-    
+    # SIDEBAR FILTERS
     with st.sidebar:
-        st.header("🛠️ Planning Controls")
+        st.header("👤 Sales Filters")
         
-        # 1. SALES REP (Multi-Select)
-        # Combine reps from both sources
-        reps_so = df_so['Rep'].unique().tolist()
-        reps_deals = df_deals['Rep'].unique().tolist() if not df_deals.empty else []
-        all_reps = sorted(list(set(reps_so + reps_deals)))
+        # 1. Rep
+        all_reps = sorted(list(set(df_main['Rep'].unique()) | set(df_deals['Rep'].unique())))
+        sel_rep = st.selectbox("Select Sales Rep", ["All"] + all_reps)
         
-        selected_reps = st.multiselect("Sales Rep(s)", all_reps)
-        
-        # Filter Data for subsequent dropdowns
-        if selected_reps:
-            df_rep_view = df_so[df_so['Rep'].isin(selected_reps)]
-        else:
-            df_rep_view = df_so
+        # Filter Dataframes
+        if sel_rep != "All":
+            df_main = df_main[df_main['Rep'] == sel_rep]
+            df_deals = df_deals[df_deals['Rep'] == sel_rep]
             
-        # 2. CUSTOMER (Multi-Select, Searchable)
-        available_customers = sorted(df_rep_view['Customer'].unique().tolist())
-        selected_customers = st.multiselect("Customer(s)", available_customers)
+        # 2. Customer
+        cust_list = sorted(df_main['Customer'].unique())
+        sel_cust = st.selectbox("Filter Customer", ["All"] + cust_list)
         
-        # Filter Data for SKU dropdown
-        if selected_customers:
-            df_cust_view = df_rep_view[df_rep_view['Customer'].isin(selected_customers)]
-        else:
-            df_cust_view = df_rep_view
+        if sel_cust != "All":
+            df_main = df_main[df_main['Customer'] == sel_cust]
+            df_deals = df_deals[df_deals['Matched_Customer'] == sel_cust]
             
-        # 3. SKU / ITEM (Multi-Select, Searchable)
-        available_skus = sorted(df_cust_view['Item'].dropna().unique().tolist())
-        selected_skus = st.multiselect("Limit to Item(s)", available_skus)
-        
         st.markdown("---")
-        st.subheader("🔮 Forecast Settings")
+        st.caption(f"📅 Current View: {CURRENT_YEAR}")
+        st.caption(f"🔭 Forecast View: {NEXT_YEAR}")
+
+    # HEADER
+    st.title(f"Sales Performance & {NEXT_YEAR} Forecast")
+    if sel_rep != "All":
+        st.markdown(f"**Rep:** {sel_rep}")
+    
+    # ══════════════════════════════════════════════════════════════════════════
+    # GLOBAL METRICS (TOP ROW)
+    # ══════════════════════════════════════════════════════════════════════════
+    
+    # 1. 2025 Revenue (Invoiced)
+    rev_2025 = df_main[
+        (df_main['Type'] == 'Invoiced') & 
+        (df_main['Inv_Date'].dt.year == CURRENT_YEAR)
+    ]['Amount'].sum()
+    
+    # 2. Q4 2025 Revenue (Invoiced)
+    rev_q4 = df_main[
+        (df_main['Type'] == 'Invoiced') & 
+        (df_main['Inv_Date'].dt.year == CURRENT_YEAR) & 
+        (df_main['Inv_Date'].dt.quarter == 4)
+    ]['Amount'].sum()
+    
+    # 3. Active Backlog (Pending SOs)
+    backlog = df_main[df_main['Type'] == 'Pending SO']['Amount'].sum()
+    
+    # 4. Pipeline Remainder of Year (Q4 2025 deals)
+    pipe_q4 = df_deals[
+        (df_deals['Close Date'].dt.year == CURRENT_YEAR) & 
+        (df_deals['Close Date'].dt.quarter == 4)
+    ]['Amount'].sum()
+
+    # Display Metrics
+    c1, c2, c3, c4 = st.columns(4)
+    def kpi(label, val, col):
+        col.markdown(f"""
+        <div class="metric-container">
+            <div class="metric-label">{label}</div>
+            <div class="metric-value">${val:,.0f}</div>
+        </div>
+        """, unsafe_allow_html=True)
         
-        forecast_horizon = st.select_slider("Forecast Horizon (Months)", options=[3, 6, 9, 12, 18], value=12)
-        
-        model_options = ['Weighted Moving Average']
-        if HAS_ML:
-            model_options = ['Exponential Smoothing', 'Machine Learning (RF)', 'Weighted Moving Average']
-            
-        selected_model = st.selectbox("Algorithm", model_options)
-        
-        st.info("💡 **Hybrid Logic:**\nBaseline = Statistical Forecast\nUpside = Pipeline Allocation")
+    kpi(f"{CURRENT_YEAR} Total Invoiced", rev_2025, c1)
+    kpi(f"Q4 {CURRENT_YEAR} Invoiced", rev_q4, c2)
+    kpi("Active Pending Orders", backlog, c3)
+    kpi(f"Pipeline Closing Q4 {CURRENT_YEAR}", pipe_q4, c4)
+
+    st.markdown("<br>", unsafe_allow_html=True)
 
     # ══════════════════════════════════════════════════════════════════════════
-    # GLOBAL FILTERING
+    # TABBED VIEW
     # ══════════════════════════════════════════════════════════════════════════
     
-    # 1. Historicals
-    main_df = df_so.copy()
-    if selected_reps:
-        main_df = main_df[main_df['Rep'].isin(selected_reps)]
-    if selected_customers:
-        main_df = main_df[main_df['Customer'].isin(selected_customers)]
-    if selected_skus:
-        main_df = main_df[main_df['Item'].isin(selected_skus)]
-        
-    # 2. Pipeline (Deals)
-    pipeline_df = df_deals.copy()
-    if not pipeline_df.empty:
-        if selected_customers:
-            # Show pipeline matched to these customers
-            pipeline_df = pipeline_df[pipeline_df['Matched_Customer'].isin(selected_customers)]
-        elif selected_reps:
-            # Or reps
-            pipeline_df = pipeline_df[pipeline_df['Rep'].isin(selected_reps)]
-            
-    # If filtering SKUs, we can't easily filter pipeline unless we matched products. 
-    # For now, we assume Pipeline is "Category" level if not matched.
+    tab1, tab2 = st.tabs([f"📉 {CURRENT_YEAR} Performance & Active Orders", f"🔭 {NEXT_YEAR} Forecast Builder"])
 
-    if main_df.empty:
-        st.warning("No historical data found for these filters.")
-        st.stop()
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # VIEW: TABS
-    # ══════════════════════════════════════════════════════════════════════════
-    
-    st.title("Sales Planning & Demand Forecasting")
-    
-    tab1, tab2, tab3 = st.tabs(["🤵 Sales Rep Plan", "📊 Forecast Deep Dive", "📋 Raw Data"])
-    
-    # ══════════════════════════════════════════════════════════════════════════
-    # TAB 1: SALES REP CLIENT-FACING VIEW
-    # ══════════════════════════════════════════════════════════════════════════
-    
+    # --------------------------------------------------------------------------
+    # TAB 1: CURRENT STATUS
+    # --------------------------------------------------------------------------
     with tab1:
-        st.markdown("### 🏢 Account Overview")
+        c_left, c_right = st.columns(2)
         
-        # Metrics
-        current_year = datetime.now().year
-        curr_year_sales = main_df[main_df['Date'].dt.year == current_year]['Amount'].sum()
-        last_year_sales = main_df[main_df['Date'].dt.year == (current_year - 1)]['Amount'].sum()
-        
-        # Simple Backlog: Orders with dates in future or "Open" status proxy
-        # Since we just have 'Amount' and 'Date', let's approximate Backlog as 'Amount' where Date > Today (if SO date)
-        # Better: You requested status logic earlier, but for now we stick to robust Amount
-        open_orders = 0 
-        
-        pipeline_val = pipeline_df['Amount'].sum() if not pipeline_df.empty else 0
-        
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("YTD Sales", f"${curr_year_sales:,.0f}", delta=f"${(curr_year_sales-last_year_sales):,.0f} vs LY")
-        m2.metric("Projected Pipeline", f"${pipeline_val:,.0f}")
-        m3.metric("Active SKUs", main_df['Item'].nunique())
-        m4.metric("Avg Order Value", f"${main_df['Amount'].mean():,.0f}")
-        
+        with c_left:
+            st.subheader(f"✅ {CURRENT_YEAR} Invoiced Revenue (By Customer)")
+            # Show top customers for 2025
+            hist_25 = df_main[
+                (df_main['Type'] == 'Invoiced') & 
+                (df_main['Inv_Date'].dt.year == CURRENT_YEAR)
+            ]
+            if not hist_25.empty:
+                cust_perf = hist_25.groupby('Customer')['Amount'].sum().sort_values(ascending=False).reset_index()
+                st.dataframe(
+                    cust_perf, 
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={"Amount": st.column_config.NumberColumn(format="$%d")}
+                )
+            else:
+                st.info("No invoiced revenue for 2025 yet.")
+
+        with c_right:
+            st.subheader("📦 Pending Sales Orders (Backlog)")
+            # Show specific Pending Orders details
+            pending = df_main[df_main['Type'] == 'Pending SO'].copy()
+            if not pending.empty:
+                pending_view = pending[['SO_Date', 'Customer', 'SO_Num', 'Amount']].sort_values('SO_Date', ascending=False)
+                st.dataframe(
+                    pending_view,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "SO_Date": st.column_config.DateColumn("Date Created", format="MMM DD, YYYY"),
+                        "Amount": st.column_config.NumberColumn(format="$%d")
+                    }
+                )
+            else:
+                st.success("No pending backorders! All caught up.")
+
         st.markdown("---")
-        
-        # 1. HISTORICAL CADENCE
-        st.subheader("📅 Ordering Cadence")
-        st.caption("Are they ordering consistently? Spot gaps in the heatmap.")
-        
-        if not main_df.empty:
-            cadence_df = main_df.groupby([pd.Grouper(key='Date', freq='ME'), 'Item'])['Qty'].sum().reset_index()
-            fig_cadence = px.density_heatmap(
-                cadence_df,
-                x='Date',
-                y='Item',
-                z='Qty',
-                color_continuous_scale='Blues',
-                title='Order Volume Heatmap (Qty)',
-            )
-            st.plotly_chart(fig_cadence, use_container_width=True)
-        
-        # 2. SKU-LEVEL DEMAND PLAN
-        st.subheader(f"📦 SKU-Level Demand Plan ({forecast_horizon} Months)")
-        
-        # --- GENERATE FORECASTS PER SKU ---
-        sku_plans = []
-        
-        # Top SKUs only to prevent slow down
-        top_skus = main_df.groupby('Item')['Amount'].sum().nlargest(30).index.tolist()
-        
-        for sku in top_skus:
-            # 1. Get History
-            sku_hist = main_df[main_df['Item'] == sku].set_index('Date')
-            
-            # 2. Run Model
-            fcst_series = generate_forecast(sku_hist, horizon_months=forecast_horizon, model_type=selected_model)
-            
-            # 3. Pipeline Allocation
-            # Ratio: This SKU's share of total history
-            total_rev = main_df['Amount'].sum()
-            sku_rev = sku_hist['Amount'].sum()
-            share = sku_rev / total_rev if total_rev > 0 else 0
-            
-            # Allocated Pipeline Value (assuming Pipeline is generic)
-            allocated_pipe_val = pipeline_val * share
-            
-            # Convert Value to Qty estimate (using avg price)
-            avg_price = sku_rev / sku_hist['Qty'].sum() if sku_hist['Qty'].sum() > 0 else 1
-            allocated_pipe_qty = allocated_pipe_val / avg_price
-            
-            # Add uplift to forecast per month
-            uplift_per_month = allocated_pipe_qty / forecast_horizon
-            final_forecast = fcst_series + uplift_per_month
-            
-            # Bucketing
-            next_year = current_year + 1
-            q1_next = 0
-            total_fcst = 0
-            
-            for date_val, qty in final_forecast.items():
-                total_fcst += qty
-                if date_val.year == next_year and date_val.month <= 3:
-                    q1_next += qty
-            
-            sku_plans.append({
-                "SKU": sku,
-                "Avg Monthly Qty": sku_hist['Qty'].mean(),
-                f"Q1 {next_year} Forecast": q1_next,
-                f"Total {forecast_horizon}mo Forecast": total_fcst,
-                "Pipeline Uplift (Qty)": allocated_pipe_qty
-            })
-            
-        plan_df = pd.DataFrame(sku_plans)
-        
-        if not plan_df.empty:
-            # Removed background_gradient styling to avoid matplotlib error
+        st.subheader(f"🎯 Pipeline Deals Closing Remaining {CURRENT_YEAR}")
+        # Deals closing in Q4 2025
+        deals_now = df_deals[
+            (df_deals['Close Date'].dt.year == CURRENT_YEAR) & 
+            (df_deals['Close Date'].dt.quarter == 4)
+        ]
+        if not deals_now.empty:
             st.dataframe(
-                plan_df,
+                deals_now[['Close Date', 'Deal Name', 'Stage', 'Amount']],
                 use_container_width=True,
+                hide_index=True,
                 column_config={
-                    "Avg Monthly Qty": st.column_config.NumberColumn(format="%.0f"),
-                    f"Q1 {next_year} Forecast": st.column_config.NumberColumn(format="%.0f"),
-                    f"Total {forecast_horizon}mo Forecast": st.column_config.NumberColumn(format="%.0f"),
-                    "Pipeline Uplift (Qty)": st.column_config.NumberColumn(format="%.0f"),
+                    "Close Date": st.column_config.DateColumn(format="MMM DD, YYYY"),
+                    "Amount": st.column_config.NumberColumn(format="$%d")
                 }
             )
         else:
-            st.info("No sufficient data to generate SKU plans.")
+            st.info(f"No pipeline deals set to close in remainder of {CURRENT_YEAR}.")
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # TAB 2: FORECAST DEEP DIVE
-    # ══════════════════════════════════════════════════════════════════════════
-    
+    # --------------------------------------------------------------------------
+    # TAB 2: 2026 FORECAST BUILDER
+    # --------------------------------------------------------------------------
     with tab2:
-        st.subheader("📈 Top-Down vs Bottom-Up Forecast")
+        st.markdown(f"### 🔮 {NEXT_YEAR} Quarterly Forecast")
         
-        # 1. Total Revenue Timeline
-        hist_rev = main_df.resample('ME', on='Date')['Amount'].sum()
+        # Toggle for Granularity
+        granularity = st.radio("Forecast Level:", ["Customer", "Item"], horizontal=True)
         
-        # Forecast Aggregate
-        hist_df_agg = pd.DataFrame({'Qty': hist_rev}) 
-        fcst_rev = generate_forecast(hist_df_agg, horizon_months=forecast_horizon, model_type=selected_model)
+        # 1. GENERATE FORECAST TABLE
+        forecast_df = generate_detailed_forecast(df_main, df_deals, granularity=granularity, year_target=NEXT_YEAR)
         
-        # Pipeline Overlay
-        pipe_overlay = pd.Series(0, index=fcst_rev.index)
-        if not pipeline_df.empty:
-             # Try to overlay pipeline on Close Date
-             p_resamp = pipeline_df.set_index('Close Date').resample('ME')['Amount'].sum()
-             # Reindex to match forecast
-             pipe_overlay = p_resamp.reindex(fcst_rev.index, fill_value=0)
-        
-        fig_hybrid = go.Figure()
-        
-        # Historical
-        fig_hybrid.add_trace(go.Scatter(
-            x=hist_rev.index, y=hist_rev.values,
-            mode='lines', name='Historical Sales',
-            line=dict(color='#0f172a', width=3)
-        ))
-        
-        # Baseline Forecast
-        fig_hybrid.add_trace(go.Scatter(
-            x=fcst_rev.index, y=fcst_rev.values,
-            mode='lines+markers', name=f'Baseline Forecast',
-            line=dict(color='#3b82f6', dash='dash')
-        ))
-        
-        # Pipeline Stacking
-        fig_hybrid.add_trace(go.Bar(
-            x=pipe_overlay.index, y=pipe_overlay.values,
-            name='HubSpot Pipeline',
-            marker_color='#f59e0b',
-            opacity=0.6
-        ))
-        
-        fig_hybrid.update_layout(title="Hybrid Revenue Forecast", height=500, xaxis_title="Date", yaxis_title="Revenue ($)")
-        st.plotly_chart(fig_hybrid, use_container_width=True)
-        
-        st.markdown("### 🧩 Category Allocation Logic")
-        st.write("""
-        HubSpot deals often lack specific SKUs. This tool uses **Category Allocation**:
-        1. We take the total pipeline value for the selected customer(s).
-        2. We analyze the historical SKU mix for these customers.
-        3. We distribute the pipeline revenue to SKUs based on their historical share.
-        """)
-        
-        if not main_df.empty:
-            fig_mix = px.pie(main_df, names='Product Type', values='Amount', title='Historical Product Mix (Used for Allocation)')
-            st.plotly_chart(fig_mix)
+        if not forecast_df.empty:
+            # Sort by Total 2026
+            forecast_df = forecast_df.sort_values(f"Total {NEXT_YEAR}", ascending=False)
+            
+            # Display interactive table
+            st.dataframe(
+                forecast_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "2025 Actuals": st.column_config.NumberColumn(format="$%d", help="Total invoiced in 2025"),
+                    f"Q1 {NEXT_YEAR}": st.column_config.NumberColumn(format="$%d"),
+                    f"Q2 {NEXT_YEAR}": st.column_config.NumberColumn(format="$%d"),
+                    f"Q3 {NEXT_YEAR}": st.column_config.NumberColumn(format="$%d"),
+                    f"Q4 {NEXT_YEAR}": st.column_config.NumberColumn(format="$%d"),
+                    f"Total {NEXT_YEAR}": st.column_config.NumberColumn(format="$%d"),
+                }
+            )
+            
+            # 2. TOTAL 2026 METRICS
+            total_26 = forecast_df[f"Total {NEXT_YEAR}"].sum()
+            growth = total_26 - rev_2025
+            
+            m1, m2 = st.columns(2)
+            m1.metric(f"Total {NEXT_YEAR} Forecast", f"${total_26:,.0f}")
+            m2.metric("Projected Growth vs 2025", f"${growth:,.0f}", delta_color="normal")
+            
+        else:
+            st.warning("Insufficient data to generate forecast.")
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # TAB 3: RAW DATA
-    # ══════════════════════════════════════════════════════════════════════════
-    
-    with tab3:
-        st.write("### Filtered Historical Data")
-        st.dataframe(main_df, use_container_width=True)
-        
-        st.write("### Matched Pipeline Deals")
-        st.dataframe(pipeline_df, use_container_width=True)
+        st.markdown("---")
+        st.subheader(f"📋 Raw Pipeline for {NEXT_YEAR}")
+        # Show the raw deals feeding the forecast
+        deals_next = df_deals[df_deals['Close Date'].dt.year == NEXT_YEAR]
+        if not deals_next.empty:
+            st.dataframe(
+                deals_next[['Close Date', 'Matched_Customer', 'Deal Name', 'Stage', 'Amount']],
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Close Date": st.column_config.DateColumn(format="MMM DD, YYYY"),
+                    "Amount": st.column_config.NumberColumn(format="$%d")
+                }
+            )
+        else:
+            st.info(f"No deals currently in pipeline for {NEXT_YEAR}.")
 
 if __name__ == "__main__":
     main()
