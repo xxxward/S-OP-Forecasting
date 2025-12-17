@@ -1,11 +1,11 @@
 """
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    CALYX - SALES PLANNING & FORECASTING TOOL (v3.1 - Robust Data Loading)
+    CALYX - SALES PLANNING & FORECASTING TOOL (v3.2 - Fixed Data Loading)
     Includes:
     - Smart Cascading Filters (Rep -> Customer -> SKU)
     - Hybrid Forecasting (Statistical + Machine Learning)
     - Pipeline Allocation Logic (Category -> SKU)
-    - Robust Column Matching (Fixes KeyError)
+    - CRITICAL FIX: Header Deduplication to prevent "axis=0" errors
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
@@ -76,13 +76,31 @@ except ImportError:
 # DATA LOADING HELPER FUNCTIONS
 # ══════════════════════════════════════════════════════════════════════════════
 
+def deduplicate_headers(headers):
+    """Ensures all headers are unique by appending _1, _2, etc."""
+    deduped = []
+    counts = {}
+    for h in headers:
+        h_clean = str(h).strip()
+        if h_clean in counts:
+            counts[h_clean] += 1
+            deduped.append(f"{h_clean}_{counts[h_clean]}")
+        else:
+            counts[h_clean] = 0
+            deduped.append(h_clean)
+    return deduped
+
 def safe_get_col(df, candidates, default_val='Unknown'):
-    """Tries multiple column names, returns the first one found or a default series."""
+    """Tries multiple column names, returns the first one found as a SERIES."""
     for col in candidates:
-        # Case-insensitive check
+        # Case-insensitive matching
         matches = [c for c in df.columns if c.strip().lower() == col.strip().lower()]
         if matches:
+            # We take matches[0] specifically. Because we deduplicated headers,
+            # this guaranteed to return a Series, never a DataFrame.
             return df[matches[0]]
+            
+    # If not found, return default series
     return pd.Series([default_val] * len(df), index=df.index)
 
 @st.cache_data(ttl=3600)
@@ -122,12 +140,14 @@ def load_data():
         try:
             ws_so = sh.worksheet(SHEET_SO_INV)
             rows_so = ws_so.get_all_values()
-            # If empty or just header
+            
             if len(rows_so) < 2:
                 st.warning(f"Sheet '{SHEET_SO_INV}' seems empty.")
                 df_so = pd.DataFrame()
             else:
-                df_so = pd.DataFrame(rows_so[1:], columns=rows_so[0])
+                # --- CRITICAL FIX: DEDUPLICATE HEADERS ---
+                headers = deduplicate_headers(rows_so[0])
+                df_so = pd.DataFrame(rows_so[1:], columns=headers)
         except Exception as e:
             st.error(f"Could not load sheet '{SHEET_SO_INV}': {e}")
             df_so = pd.DataFrame()
@@ -141,20 +161,22 @@ def load_data():
                 df_deals = pd.DataFrame()
             else:
                 # Headers are in Row 2 (index 1), Data starts Row 3 (index 2)
-                df_deals = pd.DataFrame(rows_deals[2:], columns=rows_deals[1])
+                # --- CRITICAL FIX: DEDUPLICATE HEADERS ---
+                headers = deduplicate_headers(rows_deals[1])
+                df_deals = pd.DataFrame(rows_deals[2:], columns=headers)
         except Exception as e:
             st.error(f"Could not load sheet '{SHEET_DEALS}': {e}")
             df_deals = pd.DataFrame()
 
         # --- PRE-PROCESSING SO ---
         if not df_so.empty:
-            # Clean Headers: Strip whitespace
-            df_so.columns = [str(c).strip() for c in df_so.columns]
             
             # Safe Column Extraction
-            # Rep
+            # Rep: Try multiple variations
             rep_inv = safe_get_col(df_so, ['Inv - Rep Master', 'Inv-Rep Master', 'Rep Master'])
             rep_so = safe_get_col(df_so, ['SO - Rep Master', 'SO-Rep Master', 'Rep'])
+            
+            # Combine series (safe now that headers are unique)
             df_so['Rep'] = rep_inv.replace('', np.nan).combine_first(rep_so.replace('', np.nan)).fillna('Unassigned').astype(str).str.strip()
             
             # Customer
@@ -183,8 +205,6 @@ def load_data():
 
         # --- PRE-PROCESSING DEALS ---
         if not df_deals.empty:
-            # Clean Headers
-            df_deals.columns = [str(c).strip() for c in df_deals.columns]
             
             # Filter Include?
             include_col = safe_get_col(df_deals, ['Include?', 'Include'])
