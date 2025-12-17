@@ -1,11 +1,11 @@
 """
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    CALYX - SALES PLANNING & FORECASTING TOOL (v3.2 - Fixed Data Loading)
+    CALYX - SALES PLANNING & FORECASTING TOOL (v3.3 - Stable)
     Includes:
     - Smart Cascading Filters (Rep -> Customer -> SKU)
     - Hybrid Forecasting (Statistical + Machine Learning)
     - Pipeline Allocation Logic (Category -> SKU)
-    - CRITICAL FIX: Header Deduplication to prevent "axis=0" errors
+    - FIXED: Removed Matplotlib dependency for dataframe styling
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
@@ -96,8 +96,6 @@ def safe_get_col(df, candidates, default_val='Unknown'):
         # Case-insensitive matching
         matches = [c for c in df.columns if c.strip().lower() == col.strip().lower()]
         if matches:
-            # We take matches[0] specifically. Because we deduplicated headers,
-            # this guaranteed to return a Series, never a DataFrame.
             return df[matches[0]]
             
     # If not found, return default series
@@ -145,7 +143,7 @@ def load_data():
                 st.warning(f"Sheet '{SHEET_SO_INV}' seems empty.")
                 df_so = pd.DataFrame()
             else:
-                # --- CRITICAL FIX: DEDUPLICATE HEADERS ---
+                # --- DEDUPLICATE HEADERS ---
                 headers = deduplicate_headers(rows_so[0])
                 df_so = pd.DataFrame(rows_so[1:], columns=headers)
         except Exception as e:
@@ -161,7 +159,7 @@ def load_data():
                 df_deals = pd.DataFrame()
             else:
                 # Headers are in Row 2 (index 1), Data starts Row 3 (index 2)
-                # --- CRITICAL FIX: DEDUPLICATE HEADERS ---
+                # --- DEDUPLICATE HEADERS ---
                 headers = deduplicate_headers(rows_deals[1])
                 df_deals = pd.DataFrame(rows_deals[2:], columns=headers)
         except Exception as e:
@@ -525,13 +523,15 @@ def main():
         plan_df = pd.DataFrame(sku_plans)
         
         if not plan_df.empty:
+            # Removed background_gradient styling to avoid matplotlib error
             st.dataframe(
-                plan_df.style.background_gradient(subset=[f"Q1 {next_year} Forecast"], cmap='Greens'),
+                plan_df,
                 use_container_width=True,
                 column_config={
                     "Avg Monthly Qty": st.column_config.NumberColumn(format="%.0f"),
                     f"Q1 {next_year} Forecast": st.column_config.NumberColumn(format="%.0f"),
                     f"Total {forecast_horizon}mo Forecast": st.column_config.NumberColumn(format="%.0f"),
+                    "Pipeline Uplift (Qty)": st.column_config.NumberColumn(format="%.0f"),
                 }
             )
         else:
